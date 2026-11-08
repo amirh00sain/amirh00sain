@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>حالم داغونه</title>
+<link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@800&display=swap" rel="stylesheet">
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden}
+  canvas{position:fixed;inset:0;display:block;width:100%;height:100%}
+  #bg{image-rendering:pixelated;image-rendering:crisp-edges;background:#000}
+</style>
+</head>
+<body>
+<canvas id="bg"></canvas>
+<canvas id="c"></canvas>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const bgc = document.getElementById('bg');
+const LINES = ['حالم داغونه', 'مثل بارونه آخر هفته'];
+let W, H, DPR, parts = [], gap = 10, PX = 6, BW = 0, BH = 0, BG = null, light = null;
+
+const T_GATHER = 4.6, T_HOLD = 4.2, T_SCATTER = 4.6, T_PAUSE = 0.8;
+const T_TOTAL = T_GATHER + T_HOLD + T_SCATTER + T_PAUSE;
+const clamp = (v) => Math.max(0, Math.min(1, v));
+const easeOut = (t) => 1 - Math.pow(1 - t, 3);
+const easeIn = (t) => t * t * t;
+const easeInOut = (t) => t < .5 ? 4*t*t*t : 1 - Math.pow(-2*t + 2, 3) / 2;
+
+/* ---------- colors: green → yellow → orange, with glow sprites ---------- */
+const STOPS = [[255,96,80],[245,40,48],[214,8,34],[255,60,50]];
+const grad = (t) => {
+  const s = t * (STOPS.length - 1), i = Math.min(STOPS.length - 2, Math.floor(s)), f = s - i;
+  return STOPS[i].map((v, k) => Math.round(v + (STOPS[i+1][k] - v) * f));
+};
+const NC = 20;
+const COLS = Array.from({length: NC}, (_, i) => {
+  const c = grad(i / (NC - 1));
+  const mix = (a, b) => `rgb(${c.map(v => Math.round(v + (b - v) * a))})`;
+  const g = document.createElement('canvas'); g.width = g.height = 64;
+  const x = g.getContext('2d'), r = x.createRadialGradient(32,32,0,32,32,32);
+  r.addColorStop(0, `rgba(${c},0.7)`); r.addColorStop(0.35, `rgba(${c},0.22)`); r.addColorStop(1, `rgba(${c},0)`);
+  x.fillStyle = r; x.fillRect(0, 0, 64, 64);
+  return { rgb: c, base: mix(0,0), hi: mix(.6,255), lo: mix(.5,0), glow: g };
+});
+
+/* ---------- pixel-art background (purple mountains) ---------- */
+const rnd = (n) => { const s = Math.sin(n * 127.1 + 311.7) * 43758.5453; return s - Math.floor(s); };
+const noise1 = (x, seed) => { const i = Math.floor(x), f = x - i, u = f*f*(3-2*f);
+  return rnd(i + seed*57) * (1-u) + rnd(i + 1 + seed*57) * u; };
+function ridge(x, seed) {
+  let v = 0, a = 1, fq = 1, sum = 0;
+  for (let o = 0; o < 4; o++) { v += (1 - Math.abs(noise1(x*fq, seed+o)*2 - 1)) * a; sum += a; a *= .5; fq *= 2.1; }
+  return v / sum;
+}
+function drawBg() {
+  PX = Math.max(3, Math.round(Math.min(W, H) / 150));
+  BW = Math.ceil(W / PX); BH = Math.ceil(H / PX);
+  bgc.width = BW; bgc.height = BH;
+  const g = bgc.getContext('2d');
+  const img = g.createImageData(BW, BH), d = img.data;
+  const set = (x, y, c) => { if (x<0||y<0||x>=BW||y>=BH) return; const i=(y*BW+x)*4; d[i]=c[0]; d[i+1]=c[1]; d[i+2]=c[2]; d[i+3]=255; };
+  const bayer = [[0,2],[3,1]];
+  const sky = [[0,0,0],[9,2,16],[24,6,42],[46,14,78]];
+  for (let y = 0; y < BH; y++) for (let x = 0; x < BW; x++) {
+    const t = Math.min(1, y / (BH * .75));
+    set(x, y, sky[Math.min(3, Math.floor(Math.pow(t, 1.7) * 3 + bayer[y&1][x&1] / 4))]);
+  }
+  const n = Math.floor(BW * BH / 420);
+  for (let i = 0; i < n; i++) {
+    const x = Math.floor(rnd(i*3.1)*BW), y = Math.floor(rnd(i*7.7+1)*BH*.55), r = rnd(i*5.3);
+    set(x, y, r > .75 ? [255,160,230] : r > .4 ? [200,170,255] : [210,210,225]);
+  }
+  const mx = BW*.8, my = BH*.2, mr = Math.max(5, BH*.065);
+  for (let y = Math.floor(my-mr); y <= my+mr; y++) for (let x = Math.floor(mx-mr); x <= mx+mr; x++) {
+    const a = (x-mx)**2 + (y-my)**2 <= mr*mr, b = (x-mx-mr*.45)**2 + (y-my+mr*.2)**2 <= (mr*.9)**2;
+    if (a && !b) set(x, y, [214,160,255]);
+  }
+  d.fill(0); // sky, stars and moon are now drawn live every frame; only mountains stay here
+  const layers = [
+    { base: .62, amp: .22, fq: .016, seed: 3,  c: [[142,74,196],[104,50,154]] },
+    { base: .74, amp: .25, fq: .026, seed: 11, c: [[100,46,152],[72,32,114]] },
+    { base: .86, amp: .22, fq: .040, seed: 23, c: [[64,26,106],[44,16,74]] },
+    { base: .97, amp: .15, fq: .060, seed: 37, c: [[30,10,52],[18,6,32]] }
+  ];
+  for (const L of layers) {
+    let prev = null;
+    for (let x = 0; x < BW; x++) {
+      const top = Math.round(BH * (L.base - L.amp * ridge(x*L.fq + L.seed*10, L.seed)));
+      const col = (prev === null || top <= prev) ? L.c[0] : L.c[1];
+      for (let y = top; y < BH; y++) {
+        let c = col;
+        if (y === top) c = col.map(v => Math.min(255, v + 60));
+        else if (y - top > BH*.1 && bayer[y&1][x&1] > 1) c = L.c[1];
+        set(x, y, c);
+      }
+      prev = top;
+    }
+  }
+  const skyT = new Float32Array(BW * BH);
+  for (let y = 0; y < BH; y++) for (let x = 0; x < BW; x++)
+    skyT[y*BW + x] = Math.pow(Math.min(1, y / (BH * .75)), 1.7) * 3 + bayer[y&1][x&1] / 4;
+  const stars = [], ns = Math.floor(BW * BH / 420);
+  for (let i = 0; i < ns; i++) {
+    const r = rnd(i*5.3);
+    stars.push({ x: Math.floor(rnd(i*3.1)*BW), y: Math.floor(rnd(i*7.7+1)*BH*.55), ph: rnd(i*9.9)*6.28,
+      c: r > .75 ? [255,160,230] : r > .4 ? [200,170,255] : [210,210,225] });
+  }
+  BG = { g, mt: new Uint8ClampedArray(d), comp: new Uint8ClampedArray(BW*BH*4), out: g.createImageData(BW, BH), skyT, stars };
+  light = new Float32Array(BW * BH * 3);
+}
+
+// pixel rain: two depth layers, slanted streaks, tiny splashes on the ground
+function drawRain() {
+  const comp = BG.comp, N = BW * BH * 4, now = performance.now();
+  const dt = Math.min(.05, (now - (BG.lt || now)) / 1000); BG.lt = now;
+  for (let q = 0; q < N; q += 4) { comp[q] *= .8; comp[q+1] *= .8; comp[q+2] *= .85; }   // stormy dimming
+  const mk = (init) => { const near = Math.random() < .45;
+    return { x: Math.random() * (BW + BH * .3), y: init ? Math.random() * BH : -Math.random() * 12,
+      v: near ? 150 + Math.random() * 50 : 80 + Math.random() * 30, len: near ? 5 : 3, near, gy: BH * (.8 + Math.random() * .2) }; };
+  if (!BG.drops) { BG.drops = Array.from({ length: Math.round(BW * 1.1) }, () => mk(true)); BG.splash = []; }
+  const put = (x, y, c, a) => {
+    x |= 0; y |= 0; if (x < 0 || y < 0 || x >= BW || y >= BH) return;
+    const q = (y * BW + x) * 4;
+    for (let k = 0; k < 3; k++) comp[q+k] = comp[q+k] * (1 - a) + c[k] * a;
+  };
+  const SL = .22;
+  BG.drops.forEach((d, i) => {
+    d.y += d.v * dt; d.x -= d.v * SL * dt;
+    if (d.y >= d.gy) { if (d.near) BG.splash.push({ x: d.x, y: d.gy, age: 0 }); BG.drops[i] = mk(false); return; }
+    const col = d.near ? [205,190,255] : [160,140,225], a0 = d.near ? .7 : .38;
+    for (let k = 0; k < d.len; k++) put(d.x + k * SL, d.y - k, col, a0 * (1 - k / d.len * .55));
+  });
+  BG.splash = BG.splash.filter(s => (s.age += dt) < .3);
+  for (const s of BG.splash) {
+    const a = 1 - s.age / .3, w = s.age > .12 ? 2 : 1;
+    put(s.x, s.y, [215,200,255], .8 * a);
+    put(s.x - w, s.y - 1, [215,200,255], .6 * a); put(s.x + w, s.y - 1, [215,200,255], .6 * a);
+  }
+}
+
+// 5-minute day/night cycle locked to the real clock (a new cycle starts at :00, :05, :10 ...)
+function renderSky() {
+  const now = Date.now(), p = (now % 300000) / 300000, tt = now / 1000;
+  const elev = Math.sin(2 * Math.PI * (p - .5));
+  const sm = (a, b, x) => { const u = clamp((x - a) / (b - a)); return u*u*(3 - 2*u); };
+  const day = sm(-.12, .35, elev);
+  const nightC = [[0,0,0],[9,2,16],[24,6,42],[46,14,78]];
+  const dayC = [[78,52,150],[118,74,176],[176,96,186],[255,150,140]];
+  const sk = nightC.map((c, i) => c.map((v, k) => v + (dayC[i][k] - v) * day));
+  const { comp, mt, skyT, stars } = BG, N = BW * BH;
+  for (let i = 0, q = 0; i < N; i++, q += 4) {
+    const c = sk[Math.min(3, skyT[i] | 0)];
+    comp[q] = c[0]; comp[q+1] = c[1]; comp[q+2] = c[2]; comp[q+3] = 255;
+  }
+  const sa = 1 - day;
+  if (sa > .02) for (const s of stars) {
+    const tw = (.55 + .45 * Math.sin(tt * 1.7 + s.ph)) * sa, q = (s.y * BW + s.x) * 4;
+    for (let k = 0; k < 3; k++) comp[q+k] = Math.min(255, comp[q+k] + s.c[k] * tw);
+  }
+  const isNight = p < .5, u = isNight ? p * 2 : (p - .5) * 2;
+  const bx = BW * (.08 + .84 * u), by = BH * .66 - BH * .54 * Math.sin(Math.PI * u), r = Math.max(5, BH * .065);
+  const put = (x, y, c, a) => {
+    x |= 0; y |= 0; if (x < 0 || y < 0 || x >= BW || y >= BH) return;
+    const q = (y * BW + x) * 4;
+    for (let k = 0; k < 3; k++) comp[q+k] = comp[q+k] * (1 - a) + c[k] * a;
+  };
+  const R = isNight ? r : r * 1.9;
+  for (let y = Math.floor(by - R); y <= by + R; y++) for (let x = Math.floor(bx - R); x <= bx + R; x++) {
+    const d2 = (x - bx) ** 2 + (y - by) ** 2;
+    if (isNight) {
+      const b2 = (x - bx - r * .45) ** 2 + (y - by + r * .2) ** 2;
+      if (d2 <= r * r && b2 > (r * .9) ** 2) put(x, y, [214,160,255], 1);
+    } else if (d2 <= r * r) put(x, y, [255,216,140], 1);
+    else if (d2 <= R * R * .8 && ((x + y) & 1) === 0) put(x, y, [255,170,120], .45);
+  }
+  const mb = 1 + day * .35;
+  for (let q = 0; q < N * 4; q += 4) if (mt[q+3]) {
+    comp[q] = Math.min(255, mt[q] * mb); comp[q+1] = Math.min(255, mt[q+1] * mb); comp[q+2] = Math.min(255, mt[q+2] * mb);
+  }
+}
+
+// the text lights the landscape: particles splat colored light, posterized to stay pixel-art
+const K = [[.12,.25,.35,.25,.12],[.25,.55,.8,.55,.25],[.35,.8,1,.8,.35],[.25,.55,.8,.55,.25],[.12,.25,.35,.25,.12]];
+function splat(x, y, rgb, a) {
+  const cx = Math.floor(x / PX), cy = Math.floor(y / PX);
+  for (let j = -2; j <= 2; j++) { const yy = cy + j; if (yy < 0 || yy >= BH) continue;
+    for (let i = -2; i <= 2; i++) { const xx = cx + i; if (xx < 0 || xx >= BW) continue;
+      const w = K[j+2][i+2] * a, o = (yy*BW + xx) * 3;
+      light[o] += rgb[0] * w; light[o+1] += rgb[1] * w; light[o+2] += rgb[2] * w; } }
+}
+function lightBg(amb) {
+  renderSky(); drawRain();
+  const b = BG.comp, o = BG.out.data;
+  for (let i = 0, p = 0, q = 0; i < BW * BH; i++, p += 4, q += 3) {
+    const lr = 1 - Math.exp(-light[q] / 255 * .5), lg = 1 - Math.exp(-light[q+1] / 255 * .5), lb = 1 - Math.exp(-light[q+2] / 255 * .5);
+    const lm = (lr + lg + lb) / 3, k = 1 + amb * .35 + lm * 1.7;
+    const L = [lr, lg, lb];
+    for (let c = 0; c < 3; c++) {
+      let v = b[p+c] * k + L[c] * 150;
+      v = Math.min(255, v); v = Math.floor(v / 255 * 9) / 9 * 255 * 1.0 + (v % 1) * 0; // posterize
+      o[p+c] = Math.max(b[p+c] * .0, v < b[p+c] ? b[p+c] : v);
+    }
+    o[p+3] = 255;
+  }
+  BG.g.putImageData(BG.out, 0, 0);
+}
+
+/* ---------- text particles ---------- */
+function edgePoint(x, y, spread) {
+  const d = [x, W - x, y, H - y], m = Math.min(...d), i = d.indexOf(m), out = 30 + Math.random() * 90;
+  if (i === 0) return [-out, y + (Math.random()-.5)*spread];
+  if (i === 1) return [W + out, y + (Math.random()-.5)*spread];
+  if (i === 2) return [x + (Math.random()-.5)*spread, -out];
+  return [x + (Math.random()-.5)*spread, H + out];
+}
+function build() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight;
+  cv.width = W * DPR; cv.height = H * DPR;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  drawBg();
+
+  const off = document.createElement('canvas'); off.width = W; off.height = H;
+  const o = off.getContext('2d');
+  let fs = Math.min(W * .15, 150);
+  const font = (s) => `800 ${s}px Vazirmatn, Tahoma, sans-serif`;
+  o.direction = 'rtl'; o.textAlign = 'center'; o.textBaseline = 'middle'; o.font = font(fs);
+  const mw = o.measureText(LINES[1]).width; if (mw > W * .86) fs *= W * .86 / mw;
+  o.font = font(fs); o.fillStyle = '#fff';
+  const lh = fs * 1.5;
+  LINES.forEach((l, i) => o.fillText(l, W / 2, H / 2 + (i - .5) * lh));
+
+  gap = Math.max(5, Math.round(fs / 14));
+  const h = gap >> 1, data = o.getImageData(0, 0, W, H).data;
+  parts = [];
+  for (let y = 0; y + h < H; y += gap) for (let x = 0; x + h < W; x += gap) {
+    if (data[((y + h) * W + x + h) * 4 + 3] > 140) {
+      const t = clamp(x / W + (Math.random() - .5) * .3);
+      const p = { hx: x, hy: y, ci: Math.min(NC-1, Math.floor(t * NC)), d: Math.random(), ph: Math.random() * 6.28,
+        sz: .82 + Math.random() * .18, arc: (Math.random() - .5) * 160, sx: 0, sy: 0, tx: 0, ty: 0 };
+      [p.sx, p.sy] = edgePoint(x, y, H * .5); [p.tx, p.ty] = edgePoint(x, y, H * .6);
+      parts.push(p);
+    }
+  }
+}
+
+let lastCycle = -1; const t0 = performance.now();
+function frame(now) {
+  const t = (now - t0) / 1000, cycle = 0, lt = T_GATHER + 1; // always in the hold phase: no intro, no outro
+  if (cycle !== lastCycle) { parts.forEach(p => { p.sx = p.tx; p.sy = p.ty; [p.tx, p.ty] = edgePoint(p.hx, p.hy, H * .6); }); lastCycle = cycle; }
+
+  ctx.globalCompositeOperation = 'destination-out';
+  ctx.fillStyle = 'rgba(0,0,0,0.22)'; ctx.fillRect(0, 0, W, H);
+  ctx.globalCompositeOperation = 'lighter';
+  light.fill(0);
+
+  const size = gap * .9, tHold = T_GATHER, tScat = T_GATHER + T_HOLD, tPause = tScat + T_SCATTER;
+  let vis = 0;
+  for (const p of parts) {
+    let x, y, a = 1, ph = 0;
+    if (lt < tHold) {
+      const k = clamp((lt / T_GATHER - p.d * .45) / .55), e = easeInOut(easeOut(k));
+      const dx = p.hx - p.sx, dy = p.hy - p.sy, len = Math.hypot(dx, dy) || 1, c = Math.sin(e * Math.PI) * p.arc;
+      x = p.sx + dx * e - dy / len * c; y = p.sy + dy * e + dx / len * c; a = clamp(k * 1.6);
+    } else if (lt < tScat) {
+      x = p.hx + Math.sin(t * 1.6 + p.ph) * 1.2; y = p.hy + Math.cos(t * 1.3 + p.ph) * 1.8;
+      a = .85 + .15 * Math.sin(t * 3 + p.ph);
+    } else if (lt < tPause) {
+      const k = easeIn(clamp(((lt - tScat) / T_SCATTER - p.d * .45) / .55));
+      const dx = p.tx - p.hx, dy = p.ty - p.hy, len = Math.hypot(dx, dy) || 1, c = Math.sin(k * Math.PI) * p.arc * .8;
+      x = p.hx + dx * k - dy / len * c; y = p.hy + dy * k + dx / len * c; a = 1 - clamp(k * 1.05 - .1);
+    } else continue;
+    if (a <= .01) continue;
+    vis += a;
+    const C = COLS[p.ci], s = Math.max(4, Math.round(size * p.sz)), X = Math.round(x), Y = Math.round(y), b = Math.max(1, Math.round(s * .2));
+    ctx.globalAlpha = a * .55; ctx.drawImage(C.glow, X + s/2 - s*1.7, Y + s/2 - s*1.7, s * 3.4, s * 3.4);   // soft glow
+    ctx.globalAlpha = a;
+    ctx.fillStyle = C.base; ctx.fillRect(X, Y, s, s);                                                      // body
+    ctx.fillStyle = C.hi; ctx.fillRect(X, Y, s, b); ctx.fillRect(X, Y, b, s);                             // top-left highlight
+    ctx.fillStyle = C.lo; ctx.fillRect(X, Y + s - b, s, b); ctx.fillRect(X + s - b, Y, b, s);             // bottom-right shade
+    if (Math.sin(t * 2.4 + p.ph * 3) > .94) {                                                              // sparkle
+      ctx.fillStyle = '#fff'; ctx.fillRect(X + s/2 - 1, Y - b, 2, s + 2*b); ctx.fillRect(X - b, Y + s/2 - 1, s + 2*b, 2);
+    }
+    splat(X + s/2, Y + s/2, C.rgb, a);
+  }
+  ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+  lightBg(parts.length ? vis / parts.length : 0);
+  requestAnimationFrame(frame);
+}
+
+(document.fonts && document.fonts.load ? document.fonts.load('800 60px Vazirmatn', 'حالم') : Promise.resolve())
+  .catch(() => {}).then(() => { build(); requestAnimationFrame(frame); });
+let rt; addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() => { build(); lastCycle = -1; }, 200); });
+</script>
+</body>
+</html>
